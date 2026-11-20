@@ -1,0 +1,12 @@
+services:
+  app:
+    build: .
+    image: schoolrooster-solver
+    ports:
+      - "${PORT:-8501}:8501"
+    volumes:
+      - rooster-data:/srv/data  # data/rooster.db blijft bewaard bij herstarten
+    restart: unless-stopped
+
+volumes:
+  rooster-data:

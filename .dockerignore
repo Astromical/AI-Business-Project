@@ -1,0 +1,12 @@
+.git
+.gitignore
+.dockerignore
+Dockerfile
+docker-compose.yml
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.claude/
+data/rooster.db

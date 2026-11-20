@@ -1,0 +1,32 @@
+# Standaardinstellingen van de solver. De app neemt deze waarden over in de zijbalk.
+
+# Tijd om een geldig rooster te verbeteren (fase 2). Loopt pas zodra er een geldig rooster is.
+tijdslimiet_s = 30
+
+# Bovengrens voor het zoeken naar het eerste geldige rooster (fase 1).
+max_tijd_zoeken_s = 300
+
+# Vaste startwaarde voor het zoeken van CP-SAT, zodat metingen en demo's te herhalen zijn.
+# Met meer dan één zoekdraad hangt de uitkomst toch nog wat af van de timing; met
+# num_workers = 1 is ze het best herhaalbaar (maar is de solver trager).
+random_seed = 0
+
+# Aantal zoekdraden van CP-SAT; 0 betekent: zoveel als de computer processorkernen heeft.
+num_workers = 0
+
+# Lesuren van één les in weekvolgorde leggen (symmetrie breken). Standaard uit: op de
+# grote variant was de solver ermee trager (zoeken 1,6 s tegen 1,2 s) en bleven er na 30 s
+# meer strafpunten over (gemiddeld 753 tegen 614, vijf runs elk, 13 november 2026).
+symmetrie_breken = false
+
+# Vakken die Z4 liever niet in het laatste uur van de dag ziet (hoofdletters tellen niet).
+zware_vakken = ["wiskunde"]
+
+# Strafpunten per overtreding van een zachte regel; gewicht 0 schakelt de regel uit.
+# Z1 tussenuren klassen, Z2 tussenuren leraren, Z3 vak twee keer op een dag,
+# Z4 zwaar vak in het laatste uur.
+[gewichten]
+Z1 = 10
+Z2 = 5
+Z3 = 5
+Z4 = 2

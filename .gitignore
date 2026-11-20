@@ -1,0 +1,19 @@
+# Virtuele omgeving
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# Tests
+.pytest_cache/
+
+# Database (wordt lokaal aangemaakt)
+data/*.db
+
+# Echte AP-gegevens, alleen lokaal
+data/datasets/
+
+# Geheime sleutel voor sessiecodes
+data/.sessiesleutel
