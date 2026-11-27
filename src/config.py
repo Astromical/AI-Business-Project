@@ -26,4 +26,5 @@ def laad_instellingen(pad: str | Path = STANDAARD_CONFIG) -> Instellingen:
         int(inhoud.get("random_seed", 0)),
         max(int(inhoud.get("num_workers", 0)), 0),
         bool(inhoud.get("symmetrie_breken", False)),
+        max(int(inhoud.get("pauze_na_uur", 0)), 0),
     )

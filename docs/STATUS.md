@@ -838,6 +838,36 @@ Op verzoek van het team (reviewpunten 6 tot en met 11).
 
 **Open punten:** de stopknop heeft geen Streamlit-test (die kan niet klikken terwijl er gerekend wordt); de solverkant wel. Tijdens de uitleg werkt stoppen niet (die duurt hoogstens 15 s). Een lopende berekening rekent door als je naar een andere pagina gaat; bij terugkomen zie je de voortgang weer.
 
+### Feedback deel 2: solver en strafscore (27 november 2026)
+
+Op branch `feedback/solver`, uit `TODO_2_SOLVER.md` (taken 2.1 tot en met 2.4). Niet gecommit.
+
+- **2.1 Benchmark:** nieuw `src/benchmark.py` en `python -m src.cli bench` (data in een database in het geheugen, meldt processor, kernen, Python, OR-Tools, seed, zoekdraden en per run status, tijd, strafscore en schendingen). Gemeten op de voorbeelddata (AMD Ryzen AI 7 350, 16 logische kernen): 16, 8 of 4 zoekdraden geven `optimaal`, strafscore 0 in 2 tot 5,4 s; 2 draden 13 tot 15 s (dat is het oude README-getal van 14 s); 1 draad loopt tegen de tijdslimiet: `geldig`, 30,6 s, strafscore 626. De 30,8 s met strafscore 17 uit de feedback past bij een machine met weinig zoekdraden: de verbetertijd van 30 s is opgebruikt voor het optimum gevonden was. README vermeldt nu hardware, configuratie, dataset en seed.
+- **2.2 Uitleg bij de strafscore:** `checker.strafposten` (zonder OR-Tools) geeft elke overtreding als `Strafpost` (nieuw in `models.py`) met regel, aantal, punten, dag, uren, klassen, leraren en lokalen. `Berekening` bewaart de posten en de gebruikte gewichten. De pagina Rooster zet harde en zachte regels apart en toont onder **Waar komen de strafpunten vandaan?** een samenvatting per regel (som = strafscore) en de lijst van overtredingen.
+- **2.3 Verder verbeteren:** de strafscore toont het verschil met het vorige rooster; `Berekening.geschiedenis` houdt elke run bij (`Poging`: soort, score voor en na, tijd, verbeterd) en de pagina toont die. Tweede vangnet in `service.reken_verder`: het nieuwe rooster wordt alleen overgenomen als de checker het geldig vindt en strikt minder strafpunten telt. De pagina onthoudt het beste geldige rooster van de sessie en biedt aan het terug te zetten als een latere berekening slechter is. Verder verbeteren schrijft niets naar de database.
+
+**Bestanden:** `src/benchmark.py` (nieuw), `src/cli.py`, `src/checker.py`, `src/models.py`, `src/service.py`, `src/views.py`, `paginas/2_Rooster.py`, `README.md`, `tests/test_benchmark.py`, `tests/test_strafuitleg.py`, `tests/test_beste_rooster.py` (nieuw). `src/ui.py` is niet gewijzigd.
+
+**Testresultaat:** volledige suite 312 geslaagd in 195 s (294 bestaande + 18 nieuwe), Python 3.12, OR-Tools 9.15.
+
+**Open punten:** Optimalisaties voor weinig kernen (bijvoorbeeld een minimum aantal zoekdraden) zijn nog niet doorgevoerd: eerst rapporteren, zoals gevraagd. `docs/DEMO.md` noemt nog "ongeveer 15 seconden" (valt onder deel 3).
+
+### Feedback deel 2: nieuwe schoolregels, taak 2.4 (27 november 2026)
+
+Op branch `feedback/solver`, na akkoord op het ontwerp (blok niet over de middagpauze, zieke docent: lessen schuiven naar een ander moment). Niet gecommit.
+
+- **Datamodel:** nieuwe tabellen `lokaal_capaciteit` (lokaal_id, capaciteit), `les_eigenschap` (les_id, blokuur, aantal_leerlingen) en `afwezig` (leraar_id, tijdslot_id). Bewust aparte tabellen in plaats van nieuwe kolommen: zo blijven oude databases (CREATE TABLE IF NOT EXISTS) en bestaande INSERTs werken. `Lokaal.capaciteit`, `Les.blokuur`, `Les.aantal_leerlingen`, `ProbleemData.pauze_na_uur` en `Instellingen.pauze_na_uur` (nieuw in `config.toml`, standaard 4) hebben standaardwaarden.
+- **H8 lokaalcapaciteit (hard):** solver: per tijdslot en per grens c niet meer lesuren met minstens c leerlingen dan lokalen van dat type waar c in past. `lokalen.py` deelt de grootste groepen eerst in, dus de toewijzing lukt altijd. Checker: aantal leerlingen tegen de capaciteit van het lokaal. Loader: een groep die in geen enkel lokaal van haar type past, geeft een fout.
+- **H9 blokuren (hard):** solver: volgnummer 1 en 2, 3 en 4, ... van een blokles staan direct na elkaar, niet over de pauze (`x[b, volgende(s)] = x[a, s]`; geen extra variabelen, dus de hints van fase 2 en Verder verbeteren blijven passen). Checker: per dag moeten de uren in paren (u, u + 1) te verdelen zijn, niet over de pauze. Loader: oneven aantal of nergens twee uren na elkaar geeft een fout. Hetzelfde lokaal voor beide uren is een voorkeur in `lokalen.py`, geen harde regel: hard zou de toewijzing achteraf soms onmogelijk maken.
+- **Herplannen:** `solver.herplan` in twee stappen binnen de tijdslimiet: eerst zo weinig mogelijk (les, tijdslot)-plaatsen loslaten, met de afwezige uren als onbeschikbaar; daarna met dat aantal als grens zo weinig mogelijk strafpunten. Oude lokalen gaan als voorkeur mee. `checker.wijzigingen` telt de wijzigingen onafhankelijk na (per les, dus nummers ruilen telt niet). Op de voorbeelddata: Peeters maandag afwezig: 2 uren getroffen, 2 verplaatst; Janssens woensdag: 2 getroffen, 3 verplaatst; Vermeulen vrijdag: 4 en 4; elk binnen 1 s optimaal.
+- **UI:** pagina Gegevens: blok **Capaciteit, blokuren en groepsgrootte** (twee bewerkbare tabellen in uitklapblokken, de vier bestaande tabbladen blijven). Pagina Rooster: **Herplannen bij afwezigheid** (docent, dagen, eventueel uren), daarna de lijst van wijzigingen en een knop terug naar het rooster zonder afwezigheid. Verder verbeteren is uit na herplannen (dat zou de afwezigheid negeren).
+
+**Bestanden:** `data/schema.sql`, `config.toml`, `src/models.py`, `src/config.py`, `src/db.py`, `src/loader.py`, `src/constraints.py`, `src/solver.py`, `src/lokalen.py`, `src/checker.py`, `src/service.py`, `src/beheer.py`, `src/views.py`, `src/cli.py`, `src/benchmark.py`, `paginas/1_Gegevens.py`, `paginas/2_Rooster.py`, `README.md`; nieuw: `tests/test_h8_h9.py`, `tests/test_herplannen.py`.
+
+**Testresultaat:** volledige suite 331 geslaagd in 215 s (294 bestaande + 37 nieuwe over 2.1 tot en met 2.4). De pagina Rooster gebruikt een meerkeuzeveld voor de afwezige docent(en), zodat de bestaande test die de keuzelijsten telt blijft slagen.
+
+**Open punten:** importeren (CSV/Excel/JSON) kent capaciteit en blokuren nog niet. Herplannen kent geen vervangers en laat geen lessen vervallen. De uitleg bij een onoplosbaar rooster kan H8 en H9 niet als oorzaak aanwijzen (alleen de validatie vooraf). Een herplanning wordt niet als "afwezigheid" bewaard bij het rooster: na opslaan is het gewoon het nieuwe rooster.
+
 ## Geblokkeerd
 
 Niets.

@@ -25,13 +25,17 @@ def maak_lesuren(lessen: tuple[Les, ...]) -> tuple[Lesuur, ...]:
     )
 
 
-def laad_probleem(con: sqlite3.Connection) -> ProbleemData:
-    """Lees de database in als ProbleemData."""
+def laad_probleem(con: sqlite3.Connection, pauze_na_uur: int = 0) -> ProbleemData:
+    """Lees de database in als ProbleemData; pauze_na_uur komt uit de instellingen."""
     tijdslots = tuple(
         Tijdslot(*rij) for rij in con.execute("SELECT id, dag, uur FROM tijdslot ORDER BY id")
     )
     lokalen = tuple(
-        Lokaal(*rij) for rij in con.execute("SELECT id, naam, type FROM lokaal ORDER BY id")
+        Lokaal(*rij)
+        for rij in con.execute(
+            "SELECT l.id, l.naam, l.type, c.capaciteit FROM lokaal l "
+            "LEFT JOIN lokaal_capaciteit c ON c.lokaal_id = l.id ORDER BY l.id"
+        )
     )
     onbeschikbaar: dict[str, set[int]] = {}
     for leraar_id, tijdslot_id in con.execute("SELECT leraar_id, tijdslot_id FROM onbeschikbaar"):
@@ -43,12 +47,14 @@ def laad_probleem(con: sqlite3.Connection) -> ProbleemData:
         )
     )
     lessen = tuple(
-        Les(*rij)
+        Les(*rij[:6], bool(rij[6]), rij[7])
         for rij in con.execute(
-            "SELECT id, vak, klas, leraar_id, aantal_per_week, lokaaltype FROM les ORDER BY id"
+            "SELECT l.id, l.vak, l.klas, l.leraar_id, l.aantal_per_week, l.lokaaltype, "
+            "COALESCE(e.blokuur, 0), e.aantal_leerlingen "
+            "FROM les l LEFT JOIN les_eigenschap e ON e.les_id = l.id ORDER BY l.id"
         )
     )
-    return ProbleemData(tijdslots, lokalen, leraren, lessen, maak_lesuren(lessen))
+    return ProbleemData(tijdslots, lokalen, leraren, lessen, maak_lesuren(lessen), pauze_na_uur)
 
 
 def valideer(data: ProbleemData) -> list[Melding]:
@@ -63,6 +69,53 @@ def valideer(data: ProbleemData) -> list[Melding]:
     meldingen += _controleer_klassen(data)
     meldingen += _controleer_leraren(data)
     meldingen += _controleer_lokalen(data)
+    meldingen += _controleer_blokuren(data)
+    meldingen += _controleer_capaciteit(data)
+    return meldingen
+
+
+def _blokstarts(data: ProbleemData) -> int:
+    """Het aantal tijdslots waar een blokuur kan beginnen (volgend uur op dezelfde dag, niet over de pauze)."""
+    bestaand = {(s.dag, s.uur) for s in data.tijdslots}
+    return sum(
+        1 for s in data.tijdslots
+        if (s.dag, s.uur + 1) in bestaand and not (data.pauze_na_uur and s.uur == data.pauze_na_uur)
+    )
+
+
+def _controleer_blokuren(data: ProbleemData) -> list[Melding]:
+    """Een blokles heeft een even aantal uren en er moeten twee uren na elkaar bestaan."""
+    meldingen = []
+    for les in data.lessen:
+        if not les.blokuur:
+            continue
+        if les.aantal_per_week % 2:
+            meldingen.append(Melding(
+                "fout",
+                f"Les {les.vak} voor klas {les.klas} is een blokuur, maar heeft {les.aantal_per_week} "
+                "uren per week; een blokuur vraagt een even aantal.",
+            ))
+        elif _blokstarts(data) == 0:
+            meldingen.append(Melding(
+                "fout", f"Les {les.vak} voor klas {les.klas} is een blokuur, maar er zijn nergens twee uren na elkaar."
+            ))
+    return meldingen
+
+
+def _controleer_capaciteit(data: ProbleemData) -> list[Melding]:
+    """Elke les met een aantal leerlingen moet in minstens één lokaal van haar type passen."""
+    meldingen = []
+    for les in data.lessen:
+        if les.aantal_leerlingen is None:
+            continue
+        lokalen = [r for r in data.lokalen if r.type == les.lokaaltype]
+        if lokalen and not any(r.capaciteit is None or r.capaciteit >= les.aantal_leerlingen for r in lokalen):
+            grootste = max(r.capaciteit for r in lokalen)
+            meldingen.append(Melding(
+                "fout",
+                f"Les {les.vak} voor klas {les.klas} heeft {les.aantal_leerlingen} leerlingen, maar het "
+                f"grootste lokaal van het type '{les.lokaaltype}' heeft maar {grootste} plaatsen.",
+            ))
     return meldingen
 
 

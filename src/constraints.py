@@ -123,6 +123,88 @@ def h4_klas_een_les(model: cp_model.CpModel, x: Variabelen, data: ProbleemData) 
         model.AddAtMostOne(vars_)
 
 
+def volgende_slot(data: ProbleemData) -> dict[int, int]:
+    """Per tijdslot het tijdslot één uur later op dezelfde dag, als een blokuur daar mag doorlopen.
+
+    Na het laatste uur van een dag en over de pauze (na data.pauze_na_uur) is er geen volgende.
+    """
+    per_dag_uur = {(slot.dag, slot.uur): slot.id for slot in data.tijdslots}
+    volgende = {}
+    for slot in data.tijdslots:
+        if data.pauze_na_uur and slot.uur == data.pauze_na_uur:
+            continue
+        nxt = per_dag_uur.get((slot.dag, slot.uur + 1))
+        if nxt is not None:
+            volgende[slot.id] = nxt
+    return volgende
+
+
+def blokparen(data: ProbleemData) -> list[tuple[int, int]]:
+    """De lesuren (indexen) die samen een blokuur vormen: volgnummer 1 en 2, 3 en 4, ..."""
+    blok = {les.id for les in data.lessen if les.blokuur}
+    per_les: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    for l, uur in enumerate(data.lesuren):
+        if uur.les_id in blok:
+            per_les[uur.les_id].append((uur.volgnummer, l))
+    paren = []
+    for uren in per_les.values():
+        volgorde = [l for _, l in sorted(uren)]
+        paren += list(zip(volgorde[0::2], volgorde[1::2]))
+    return paren
+
+
+def h9_blokuren(model: cp_model.CpModel, x: Variabelen, data: ProbleemData) -> None:
+    """H9: de twee lesuren van een blok staan direct na elkaar op dezelfde dag, niet over de pauze.
+
+    Het eerste uur van het blok bepaalt het tweede: x[b, volgende(s)] = x[a, s]. Een slot
+    zonder volgende kan geen eerste uur zijn, een slot zonder vorige geen tweede uur.
+    """
+    volgende = volgende_slot(data)
+    heeft_vorige = set(volgende.values())
+    for a, b in blokparen(data):
+        for slot in data.tijdslots:
+            s = slot.id
+            if s in volgende:
+                model.Add(x[b, volgende[s]] == x[a, s])
+            else:
+                model.Add(x[a, s] == 0)
+            if s not in heeft_vorige:
+                model.Add(x[b, s] == 0)
+
+
+def _past(lokaal_capaciteit: int | None, leerlingen: int) -> bool:
+    """Past een groep van zoveel leerlingen in een lokaal (None: geen grens)?"""
+    return lokaal_capaciteit is None or lokaal_capaciteit >= leerlingen
+
+
+def h8_lokaalcapaciteit(
+    model: cp_model.CpModel, x: Variabelen, data: ProbleemData, uitgeschakeld: frozenset[str] = frozenset()
+) -> None:
+    """H8: een les komt nooit in een te klein lokaal.
+
+    Zoals bij H2 en H5 zonder lokaalvariabelen: per tijdslot en per grens c niet meer
+    lesuren met minstens c leerlingen dan lokalen waar c leerlingen in passen (per type,
+    en over alle types samen). Omdat die groepen in elkaar passen, bestaat er dan altijd
+    een toewijzing: de grootste groepen eerst (zie src/lokalen.py).
+    """
+    leerlingen = [data.les_per_id[uur.les_id].aantal_leerlingen or 0 for uur in data.lesuren]
+    grenzen = sorted({n for n in leerlingen if n > 0})
+    if not grenzen or all(lokaal.capaciteit is None for lokaal in data.lokalen):
+        return
+    met_type = "H5" not in uitgeschakeld
+    for c in grenzen:
+        groot = _groepeer(
+            {k: v for k, v in x.items() if leerlingen[k[0]] >= c},
+            lambda l, s: (data.lesuren[l].lokaaltype if met_type else "", s),
+        )
+        for (soort, _), vars_ in groot.items():
+            plaats = sum(
+                1 for r in data.lokalen
+                if _past(r.capaciteit, c) and (not soort or r.type == soort)
+            )
+            model.Add(sum(vars_) <= plaats)
+
+
 def slotvolgorde(data: ProbleemData) -> dict[int, int]:
     """De plaats van elk tijdslot in de week: maandag uur 1 eerst."""
     dagnummer = {dag: i for i, dag in enumerate(DAGEN)}

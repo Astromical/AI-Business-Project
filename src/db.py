@@ -12,6 +12,9 @@ SCHEMA_PAD = Path(__file__).resolve().parent.parent / "data" / "schema.sql"
 # Vaste tabelnamen, in een volgorde die foreign keys respecteert bij wissen.
 TABELLEN_WISVOLGORDE: tuple[str, ...] = (
     "ingepland",
+    "afwezig",
+    "les_eigenschap",
+    "lokaal_capaciteit",
     "onbeschikbaar",
     "les",
     "leraar",
@@ -100,6 +103,8 @@ TABEL_CONFIG: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ("id", "vak", "klas", "leraar_id", "aantal_per_week", "lokaaltype"),
         ("id",),
     ),
+    "lokaal_capaciteit": (("lokaal_id", "capaciteit"), ("lokaal_id",)),
+    "les_eigenschap": (("les_id", "blokuur", "aantal_leerlingen"), ("les_id",)),
 }
 LEESBARE_TABELLEN: dict[str, tuple[str, ...]] = {
     **{naam: kolommen for naam, (kolommen, _) in TABEL_CONFIG.items()},
@@ -167,16 +172,25 @@ def sla_tabel_op(
     niet meer ingepland en de app meldt dat het rooster niet meer past.
     Bij een fout wordt niets opgeslagen.
     """
-    if tabel not in TABEL_CONFIG:
-        raise ValueError(f"Onbekende tabel: {tabel}")
-    sleutel = TABEL_CONFIG[tabel][1]
-    wis = f"DELETE FROM {tabel} WHERE " + " AND ".join(f"{k} = ?" for k in sleutel)
+    sla_tabellen_op(con, [(tabel, rijen, verwijder)])
+
+
+def sla_tabellen_op(
+    con: sqlite3.Connection, wijzigingen: list[tuple[str, list[dict], list[tuple]]]
+) -> None:
+    """Zoals sla_tabel_op, voor meerdere tabellen samen in één transactie (alles of niets)."""
+    for tabel, _, _ in wijzigingen:
+        if tabel not in TABEL_CONFIG:
+            raise ValueError(f"Onbekende tabel: {tabel}")
     try:
         with con:
-            if tabel == "lokaal":  # ingepland heeft geen cascade op lokaal
-                con.executemany("DELETE FROM ingepland WHERE lokaal_id = ?", verwijder)
-            con.executemany(wis, verwijder)
-            con.executemany(_upsert_sql(tabel), _waarden(tabel, rijen))
+            for tabel, rijen, verwijder in wijzigingen:
+                sleutel = TABEL_CONFIG[tabel][1]
+                wis = f"DELETE FROM {tabel} WHERE " + " AND ".join(f"{k} = ?" for k in sleutel)
+                if tabel == "lokaal":  # ingepland heeft geen cascade op lokaal
+                    con.executemany("DELETE FROM ingepland WHERE lokaal_id = ?", verwijder)
+                con.executemany(wis, verwijder)
+                con.executemany(_upsert_sql(tabel), _waarden(tabel, rijen))
     except sqlite3.IntegrityError as fout:
         raise OpslaanFout(_vertaal(fout)) from fout
 
@@ -297,3 +311,18 @@ def verwijder_gebruiker(con: sqlite3.Connection, naam: str) -> None:
         )
     if cursor.rowcount == 0:
         raise OpslaanFout("Er moet minstens één roostermaker overblijven.")
+
+
+def lees_afwezig(con: sqlite3.Connection) -> frozenset[tuple[str, int]]:
+    """De afwezigheid als (leraar_id, tijdslot_id)-paren."""
+    return frozenset(con.execute("SELECT leraar_id, tijdslot_id FROM afwezig"))
+
+
+def zet_afwezig(con: sqlite3.Connection, afwezig: frozenset[tuple[str, int]]) -> None:
+    """Vervang de afwezigheid door deze paren, in één transactie."""
+    try:
+        with con:
+            con.execute("DELETE FROM afwezig")
+            con.executemany("INSERT INTO afwezig (leraar_id, tijdslot_id) VALUES (?, ?)", sorted(afwezig))
+    except sqlite3.IntegrityError as fout:
+        raise OpslaanFout(_vertaal(fout)) from fout

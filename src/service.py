@@ -9,7 +9,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from src import auth, beheer, db
-from src.checker import controleer, tel_per_regel, tel_straf, tel_tussenuren
+from src.checker import (
+    controleer,
+    strafposten,
+    tel_per_regel,
+    tel_straf,
+    tel_tussenuren,
+    wijzigingen,
+)
 from src.db import (
     OpslaanFout,
     bewaar_rooster,
@@ -18,10 +25,12 @@ from src.db import (
     maak_schema,
     verbind,
 )
+from src.config import laad_instellingen
 from src.conversie import converteer
 from src.loader import laad_probleem, valideer
 from src.models import (
     DAGEN,
+    Afwezigheid,
     Gebruiker,
     Instellingen,
     Melding,
@@ -29,11 +38,25 @@ from src.models import (
     Resultaat,
     Rol,
     Schending,
+    Strafpost,
     Toewijzing,
+    Wijziging,
+    met_afwezigheid,
 )
 from src.seed import seed
-from src.solver import Voortgang, solve, verbeter_verder
+from src.solver import Voortgang, herplan, solve, verbeter_verder
 from src.uitleg import verklaar
+
+
+@dataclass(frozen=True)
+class Poging:
+    """Eén run: rooster berekenen of verder verbeteren, met de strafscore ervoor en erna."""
+
+    soort: str  # "berekenen" of "verder verbeteren"
+    voor: int | None  # strafscore van het rooster waarvan de run vertrok (None: geen)
+    na: int | None  # strafscore van het rooster dat na de run overblijft
+    tijd_s: float
+    verbeterd: bool  # True als de run een beter rooster opleverde
 
 
 @dataclass(frozen=True)
@@ -48,6 +71,45 @@ class Berekening:
     data: ProbleemData | None = None  # de gegevens waarop het rooster berekend is
     tellingen: dict[str, int] = field(default_factory=dict)  # aantal per zachte regel
     vorige_strafscore: int | None = None  # strafscore van het rooster vóór 'verder rekenen'
+    # elke overtreding van een zachte regel, met de gewichten van deze berekening
+    strafposten: tuple[Strafpost, ...] = ()
+    gewichten: dict[str, int] = field(default_factory=dict)  # gewichten van deze berekening
+    geschiedenis: tuple[Poging, ...] = ()  # de runs die tot dit rooster geleid hebben
+    afwezig: Afwezigheid = frozenset()  # bij herplannen: de afwezige (leraar, tijdslot)-paren
+    wijzigingen: tuple[Wijziging, ...] = ()  # bij herplannen: wat er veranderde
+
+
+def vergelijkbaar(a: Berekening, b: Berekening) -> bool:
+    """Gaan twee berekeningen over dezelfde gegevens, gewichten en afwezigheid?"""
+    return a.data == b.data and a.gewichten == b.gewichten and a.afwezig == b.afwezig
+
+
+def is_beter(nieuw: Berekening, oud: Berekening) -> bool:
+    """Is nieuw een geldig rooster met minder strafpunten dan oud, in dezelfde situatie?
+
+    Een rooster zonder schendingen wint altijd van een rooster met schendingen of zonder
+    rooster. Roosters voor andere gegevens, gewichten of afwezigheid zijn niet te vergelijken.
+    """
+    if not _is_geldig(nieuw):
+        return False
+    if not _is_geldig(oud):
+        return True
+    if not vergelijkbaar(nieuw, oud):
+        return False
+    a, b = nieuw.resultaat.strafscore, oud.resultaat.strafscore
+    return a is not None and (b is None or a < b)
+
+
+def _is_geldig(berekening: Berekening) -> bool:
+    """Heeft deze berekening een rooster zonder schendingen?"""
+    return bool(berekening.resultaat.toewijzingen) and not berekening.schendingen
+
+
+def _posten(
+    data: ProbleemData, toewijzingen: tuple[Toewijzing, ...], instellingen: Instellingen
+) -> tuple[Strafpost, ...]:
+    """De strafposten van een rooster volgens de onafhankelijke checker."""
+    return tuple(strafposten(data, toewijzingen, instellingen.gewichten, instellingen.zware_vakken))
 
 
 def is_actueel(berekening: Berekening, data: ProbleemData) -> bool:
@@ -109,7 +171,7 @@ def laad(pad: str | Path) -> tuple[ProbleemData, list[Melding]]:
     """Laad de gegevens en geef ze samen met de meldingen van de validatie."""
     con = open_database(pad)
     try:
-        data = laad_probleem(con)
+        data = laad_probleem(con, laad_instellingen().pauze_na_uur)
     finally:
         con.close()
     return data, valideer(data)
@@ -141,6 +203,7 @@ def bereken(
 
     Met een voortgang is de stand live te volgen en kan het rekenen gestopt worden.
     """
+    instellingen = instellingen or Instellingen()
     resultaat = solve(data, instellingen, voortgang=voortgang)
     schendingen = tuple(controleer(data, resultaat.toewijzingen)) if resultaat.toewijzingen else ()
     tussenuren = sum(tel_tussenuren(data, resultaat.toewijzingen).values())
@@ -148,12 +211,17 @@ def bereken(
     if resultaat.status == "onoplosbaar":
         if voortgang is not None:
             voortgang.fase = "uitleg"
-        tijdslimiet = min(UITLEG_MAX_S, max((instellingen or Instellingen()).tijdslimiet_s, 5.0))
+        tijdslimiet = min(UITLEG_MAX_S, max(instellingen.tijdslimiet_s, 5.0))
         uitleg = verklaar(data, tijdslimiet).teksten
-    zware_vakken = (instellingen or Instellingen()).zware_vakken
-    tellingen = tel_per_regel(data, resultaat.toewijzingen, zware_vakken)
+    tellingen = tel_per_regel(data, resultaat.toewijzingen, instellingen.zware_vakken)
     return Berekening(
-        resultaat, schendingen, tussenuren, uitleg=uitleg, data=data, tellingen=tellingen
+        resultaat, schendingen, tussenuren, uitleg=uitleg, data=data, tellingen=tellingen,
+        strafposten=_posten(data, resultaat.toewijzingen, instellingen),
+        gewichten=dict(instellingen.gewichten),
+        geschiedenis=(
+            Poging("berekenen", None, resultaat.strafscore, resultaat.oplostijd_s,
+                   bool(resultaat.toewijzingen)),
+        ),
     )
 
 
@@ -161,7 +229,7 @@ def kan_verder(berekening: Berekening) -> bool:
     """Is er een geldig rooster dat nog niet bewezen optimaal is?"""
     resultaat = berekening.resultaat
     geldig = bool(resultaat.toewijzingen) and not berekening.schendingen
-    return geldig and resultaat.status != "optimaal"
+    return geldig and resultaat.status != "optimaal" and not berekening.afwezig
 
 
 def reken_verder(
@@ -173,16 +241,88 @@ def reken_verder(
     """Reken verder vanaf het rooster van een berekening; dat rooster blijft de veilige versie."""
     instellingen = instellingen or Instellingen()
     oud = berekening.resultaat.toewijzingen
-    vorige = tel_straf(data, oud, instellingen.gewichten, instellingen.zware_vakken)
+    vorige = sum(tel_straf(data, oud, instellingen.gewichten, instellingen.zware_vakken).values())
     resultaat = verbeter_verder(data, oud, instellingen, voortgang=voortgang)
+    resultaat, verbeterd = _houd_beste(data, instellingen, oud, vorige, resultaat)
     nieuw = resultaat.toewijzingen
+    poging = Poging("verder verbeteren", vorige, resultaat.strafscore, resultaat.oplostijd_s, verbeterd)
     return Berekening(
         resultaat,
         tuple(controleer(data, nieuw)),
         sum(tel_tussenuren(data, nieuw).values()),
         data=data,
         tellingen=tel_per_regel(data, nieuw, instellingen.zware_vakken),
-        vorige_strafscore=sum(vorige.values()),
+        vorige_strafscore=vorige,
+        strafposten=_posten(data, nieuw, instellingen),
+        gewichten=dict(instellingen.gewichten),
+        geschiedenis=berekening.geschiedenis + (poging,),
+    )
+
+
+def _houd_beste(
+    data: ProbleemData,
+    instellingen: Instellingen,
+    oud: tuple[Toewijzing, ...],
+    vorige: int,
+    resultaat: Resultaat,
+) -> tuple[Resultaat, bool]:
+    """Tweede vangnet, met de onafhankelijke checker: neem het nieuwe rooster alleen als
+    het geldig is en strikt minder strafpunten heeft; anders blijft het oude staan.
+
+    Geeft het resultaat dat blijft en of dat een verbetering is.
+    """
+    nieuw = resultaat.toewijzingen
+    if nieuw == oud:
+        return resultaat, False
+    straf = tel_straf(data, nieuw, instellingen.gewichten, instellingen.zware_vakken)
+    if nieuw and not controleer(data, nieuw) and sum(straf.values()) < vorige:
+        return resultaat, True
+    oud_straf = tel_straf(data, oud, instellingen.gewichten, instellingen.zware_vakken)
+    veilig = Resultaat("geldig", oud, resultaat.oplostijd_s, vorige, oud_straf, gestopt=resultaat.gestopt)
+    return veilig, False
+
+
+def afwezigheid(pad: str | Path) -> Afwezigheid:
+    """De afwezigheid die bij het laatste herplannen is ingevuld."""
+    con = open_database(pad)
+    try:
+        return db.lees_afwezig(con)
+    finally:
+        con.close()
+
+
+def herplan_rooster(
+    pad: str | Path,
+    data: ProbleemData,
+    berekening: Berekening,
+    afwezig: Afwezigheid,
+    instellingen: Instellingen | None = None,
+    voortgang: Voortgang | None = None,
+) -> Berekening:
+    """Pas het rooster van een berekening aan voor afwezige leraren, met zo weinig mogelijk wijzigingen.
+
+    De afwezigheid wordt bewaard; het rooster in de database blijft staan tot je opslaat.
+    Gecontroleerd met de checker, met de afwezige uren als onbeschikbaar.
+    """
+    instellingen = instellingen or Instellingen()
+    con = open_database(pad)
+    try:
+        db.zet_afwezig(con, afwezig)
+    finally:
+        con.close()
+    oud = berekening.resultaat.toewijzingen
+    resultaat = herplan(data, oud, afwezig, instellingen, voortgang)
+    nieuw = resultaat.toewijzingen
+    return Berekening(
+        resultaat,
+        tuple(controleer(met_afwezigheid(data, afwezig), nieuw)) if nieuw else (),
+        sum(tel_tussenuren(data, nieuw).values()),
+        data=data,
+        tellingen=tel_per_regel(data, nieuw, instellingen.zware_vakken),
+        strafposten=_posten(data, nieuw, instellingen),
+        gewichten=dict(instellingen.gewichten),
+        afwezig=afwezig,
+        wijzigingen=tuple(wijzigingen(oud, nieuw)) if nieuw else (),
     )
 
 
@@ -222,6 +362,8 @@ def bewaard_rooster(
         True,
         data=data,
         tellingen=tel_per_regel(data, toewijzingen, zware_vakken),
+        strafposten=_posten(data, toewijzingen, instellingen),
+        gewichten=dict(instellingen.gewichten),
     )
 
 

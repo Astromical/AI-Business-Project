@@ -8,7 +8,7 @@ from typing import Literal
 
 import pandas as pd
 
-from src.models import ProbleemData, Toewijzing
+from src.models import DAGEN, ProbleemData, Strafpost, Toewijzing
 
 Soort = Literal["klas", "leraar", "lokaal"]
 SOORTEN: tuple[Soort, ...] = ("klas", "leraar", "lokaal")
@@ -152,3 +152,93 @@ def rooster_csv(data: ProbleemData, toewijzingen: tuple[Toewijzing, ...]) -> str
     tabel["_dag"] = tabel["dag"].map(dag_volgorde)
     tabel = tabel.sort_values(["klas", "_dag", "uur"]).drop(columns="_dag")
     return tabel.to_csv(index=False, lineterminator="\n")
+
+
+def straf_samenvatting(
+    posten: list[Strafpost], gewichten: dict[str, int], namen: dict[str, str]
+) -> pd.DataFrame:
+    """Per zachte regel: gewicht, aantal overtredingen en strafpunten, met een totaalrij."""
+    rijen = []
+    for regel, naam in namen.items():
+        gewicht = gewichten.get(regel, 0)
+        eigen = [p for p in posten if p.regel == regel]
+        rijen.append(
+            {
+                "regel": f"{regel} {naam}",
+                "gewicht": str(gewicht) if gewicht > 0 else "uit",
+                "overtredingen": sum(p.aantal for p in eigen),
+                "strafpunten": sum(p.punten for p in eigen),
+            }
+        )
+    rijen.append(
+        {
+            "regel": "Totaal (strafscore)",
+            "gewicht": "",
+            "overtredingen": sum(p.aantal for p in posten),
+            "strafpunten": sum(p.punten for p in posten),
+        }
+    )
+    return pd.DataFrame(rijen, columns=["regel", "gewicht", "overtredingen", "strafpunten"])
+
+
+def straf_details(posten: list[Strafpost]) -> pd.DataFrame:
+    """Elke overtreding op een rij, met de betrokken klassen, leraren en lokalen."""
+    dag_volgorde = {dag: i for i, dag in enumerate(DAGEN)}
+    gesorteerd = sorted(posten, key=lambda p: (p.regel, dag_volgorde.get(p.dag, 9), p.uren))
+    kolommen = ["regel", "punten", "dag", "uren", "klassen", "leraren", "lokalen", "uitleg"]
+    rijen = [
+        {
+            "regel": p.regel,
+            "punten": p.punten,
+            "dag": p.dag,
+            "uren": ", ".join(map(str, p.uren)),
+            "klassen": ", ".join(p.klassen),
+            "leraren": ", ".join(p.leraren),
+            "lokalen": ", ".join(p.lokalen),
+            "uitleg": p.tekst,
+        }
+        for p in gesorteerd
+    ]
+    return pd.DataFrame(rijen, columns=kolommen)
+
+
+def geschiedenis_tabel(pogingen) -> pd.DataFrame:
+    """De runs van een rooster (service.Poging) op een rij: soort, strafscore voor en na, tijd."""
+    rijen = [
+        {
+            "run": i,
+            "soort": p.soort,
+            "strafscore voor": "-" if p.voor is None else str(p.voor),
+            "strafscore na": "-" if p.na is None else str(p.na),
+            "tijd (s)": round(p.tijd_s, 1),
+            "uitkomst": "beter rooster" if p.verbeterd and p.voor is not None
+            else ("eerste rooster" if p.voor is None else "vorig rooster blijft"),
+        }
+        for i, p in enumerate(pogingen, 1)
+    ]
+    return pd.DataFrame(rijen, columns=["run", "soort", "strafscore voor", "strafscore na", "tijd (s)", "uitkomst"])
+
+
+def wijzigingen_tabel(data: ProbleemData, wijzigingen: list) -> pd.DataFrame:
+    """De wijzigingen van een herplanning: les, van en naar (dag, uur, lokaal)."""
+
+    def moment(slot_id: int | None, lokaal_id: str | None) -> str:
+        if slot_id is None:
+            return "-"
+        slot = data.tijdslot_per_id[slot_id]
+        lokaal = data.lokaal_per_id[lokaal_id].naam if lokaal_id in data.lokaal_per_id else (lokaal_id or "")
+        return f"{slot.dag} uur {slot.uur}, {lokaal}"
+
+    rijen = []
+    for w in wijzigingen:
+        les = data.les_per_id.get(w.les_id)
+        rijen.append(
+            {
+                "klas": les.klas if les else "",
+                "vak": les.vak if les else w.les_id,
+                "docent": data.leraar_per_id[les.leraar_id].naam if les else "",
+                "van": moment(w.van_slot, w.van_lokaal),
+                "naar": moment(w.naar_slot, w.naar_lokaal),
+            }
+        )
+    return pd.DataFrame(rijen, columns=["klas", "vak", "docent", "van", "naar"])

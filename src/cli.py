@@ -1,4 +1,4 @@
-"""Opdrachtregel: python -m src.cli seed|solve|check."""
+"""Opdrachtregel: python -m src.cli seed|solve|check|bench."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import argparse
 from dataclasses import replace
 from pathlib import Path
 
+from src.benchmark import benchmark
 from src.checker import controleer
 from src.db import maak_schema, verbind
 from src.loader import laad_probleem, valideer
@@ -56,7 +57,7 @@ def _laad(pad: str) -> ProbleemData | None:
         return None
     con = verbind(pad)
     try:
-        data = laad_probleem(con)
+        data = laad_probleem(con, laad_instellingen().pauze_na_uur)
     finally:
         con.close()
     meldingen = valideer(data)
@@ -124,6 +125,11 @@ def main(argv: list[str] | None = None) -> None:
     p_check = sub.add_parser("check", help="los op en controleer het rooster")
     p_check.add_argument("--pad", default=STANDAARD_PAD)
     p_check.add_argument("--tijdslimiet", type=float, default=None)
+    p_bench = sub.add_parser("bench", help="meet de solver op de voorbeelddata")
+    p_bench.add_argument("--variant", choices=VARIANTEN, default="voorbeeld")
+    p_bench.add_argument("--runs", type=int, default=3)
+    p_bench.add_argument("--tijdslimiet", type=float, default=None)
+    p_bench.add_argument("--werkers", type=int, default=None, help="aantal zoekdraden (0: alle kernen)")
     args = parser.parse_args(argv)
     if args.opdracht == "seed":
         _seed(args.pad, args.variant)
@@ -131,6 +137,8 @@ def main(argv: list[str] | None = None) -> None:
         _solve(args.pad, args.tijdslimiet)
     elif args.opdracht == "check":
         _check(args.pad, args.tijdslimiet)
+    elif args.opdracht == "bench":
+        print(benchmark(args.variant, _instellingen(args.tijdslimiet), args.runs, args.werkers))
 
 
 if __name__ == "__main__":

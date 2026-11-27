@@ -15,6 +15,8 @@ from src.db import OpslaanFout
 from src.models import DAGEN
 
 TABBLADEN: tuple[str, ...] = ("leraar", "lokaal", "onbeschikbaar", "les")
+# Extra gegevens voor H8 (capaciteit) en H9 (blokuren), elk in een eigen tabel.
+EXTRA_TABELLEN: tuple[str, ...] = ("lokaal_capaciteit", "les_eigenschap")
 
 # Kolommen zoals de gebruiker ze ziet; bij onbeschikbaar staan dag en uur in plaats van een tijdslot-id.
 WEERGAVE_KOLOMMEN: dict[str, tuple[str, ...]] = {
@@ -22,14 +24,18 @@ WEERGAVE_KOLOMMEN: dict[str, tuple[str, ...]] = {
     "lokaal": ("id", "naam", "type"),
     "onbeschikbaar": ("leraar_id", "dag", "uur"),
     "les": ("id", "vak", "klas", "leraar_id", "aantal_per_week", "lokaaltype"),
+    "lokaal_capaciteit": ("lokaal_id", "capaciteit"),
+    "les_eigenschap": ("les_id", "blokuur", "aantal_leerlingen"),
 }
 WEERGAVE_SLEUTELS: dict[str, tuple[str, ...]] = {
     "leraar": ("id",),
     "lokaal": ("id",),
     "onbeschikbaar": ("leraar_id", "dag", "uur"),
     "les": ("id",),
+    "lokaal_capaciteit": ("lokaal_id",),
+    "les_eigenschap": ("les_id",),
 }
-GEHELE_GETALLEN = {"max_uren_per_dag", "aantal_per_week", "uur"}
+GEHELE_GETALLEN = {"max_uren_per_dag", "aantal_per_week", "uur", "capaciteit", "aantal_leerlingen"}
 
 
 def lees(con: sqlite3.Connection, tabel: str) -> pd.DataFrame:
@@ -41,6 +47,8 @@ def lees(con: sqlite3.Connection, tabel: str) -> pd.DataFrame:
             {"leraar_id": r["leraar_id"], "dag": slots[r["tijdslot_id"]]["dag"], "uur": slots[r["tijdslot_id"]]["uur"]}
             for r in rijen
         ]
+    if tabel == "les_eigenschap":  # een vinkje in de tabel
+        rijen = [{**r, "blokuur": bool(r["blokuur"])} for r in rijen]
     return pd.DataFrame(rijen, columns=list(WEERGAVE_KOLOMMEN[tabel]))
 
 
@@ -50,6 +58,8 @@ def _schoon(waarde: object, kolom: str) -> object:
         return None
     if hasattr(waarde, "item"):
         waarde = waarde.item()
+    if kolom == "blokuur":
+        return int(bool(waarde))
     if isinstance(waarde, str):
         waarde = waarde.strip()
         if not waarde:
@@ -68,7 +78,8 @@ def _rijen(tabel: pd.DataFrame, kolommen: tuple[str, ...]) -> list[dict]:
         {k: _schoon(rij.get(k), k) for k in kolommen}
         for rij in tabel.to_dict("records")
     ]
-    return [r for r in rijen if any(v is not None for v in r.values())]
+    # een rij met alleen een leeg vinkje (blokuur 0) telt als leeg
+    return [r for r in rijen if any(v is not None for k, v in r.items() if not (k == "blokuur" and v == 0))]
 
 
 def bepaal_wijzigingen(

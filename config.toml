@@ -19,6 +19,10 @@ num_workers = 0
 # meer strafpunten over (gemiddeld 753 tegen 614, vijf runs elk, 13 november 2026).
 symmetrie_breken = false
 
+# Een blokuur (twee lesuren na elkaar, H9) loopt niet over de middagpauze na dit uur.
+# 0 betekent: geen pauze. Bij AP (09:00-13:00 en 14:00-18:00) is dat uur 4.
+pauze_na_uur = 4
+
 # Vakken die Z4 liever niet in het laatste uur van de dag ziet (hoofdletters tellen niet).
 zware_vakken = ["wiskunde"]
 

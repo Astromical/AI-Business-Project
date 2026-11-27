@@ -40,6 +40,8 @@ try:
 
     # --- Tabellen ---
     leraren = [r["id"] for r in beheer.lees(con, "leraar").to_dict("records")]
+    lokalen = [r["id"] for r in beheer.lees(con, "lokaal").to_dict("records")]
+    lessen = [r["id"] for r in beheer.lees(con, "les").to_dict("records")]
     kolom_instellingen = {
         "lokaal": {"type": st.column_config.SelectboxColumn("type", options=["regulier", "lab", "gym"], required=True)},
         "onbeschikbaar": {
@@ -55,28 +57,63 @@ try:
         "leraar": {
             "max_uren_per_dag": st.column_config.NumberColumn("max_uren_per_dag", min_value=1, max_value=8, step=1, required=True)
         },
+        "lokaal_capaciteit": {
+            "lokaal_id": st.column_config.SelectboxColumn("lokaal_id", options=lokalen, required=True),
+            "capaciteit": st.column_config.NumberColumn(
+                "capaciteit", min_value=1, step=1, required=True, help="Aantal leerlingen dat in het lokaal past."
+            ),
+        },
+        "les_eigenschap": {
+            "les_id": st.column_config.SelectboxColumn("les_id", options=lessen, required=True),
+            "blokuur": st.column_config.CheckboxColumn(
+                "blokuur", default=False, help="De lesuren komen per twee na elkaar (even aantal per week nodig)."
+            ),
+            "aantal_leerlingen": st.column_config.NumberColumn(
+                "aantal_leerlingen", min_value=1, step=1, help="Moet in het lokaal passen. Leeg: onbekend."
+            ),
+        },
     }
-    namen = {"leraar": "Leraren", "lokaal": "Lokalen", "onbeschikbaar": "Onbeschikbaar", "les": "Lessen"}
+    namen = {
+        "leraar": "Leraren", "lokaal": "Lokalen", "onbeschikbaar": "Onbeschikbaar", "les": "Lessen",
+        "lokaal_capaciteit": "Capaciteit lokalen", "les_eigenschap": "Blokuren en groepsgrootte",
+    }
+    uitleg = {
+        "lokaal_capaciteit": "Hoeveel leerlingen er in een lokaal passen. Een lokaal zonder rij heeft geen grens.",
+        "les_eigenschap": "Per les: blokuur (lesuren per twee na elkaar, niet over de middagpauze uit "
+        "config.toml) en het aantal leerlingen. Een les zonder rij is een gewone les.",
+    }
+
+    def bewerk(tabel: str) -> None:
+        """Een bewerkbare tabel met een knop Opslaan."""
+        if tabel in uitleg:
+            st.caption(uitleg[tabel])
+        bewerkt = st.data_editor(
+            beheer.lees(con, tabel),
+            num_rows="dynamic",
+            key=f"editor_{tabel}",
+            column_config=kolom_instellingen.get(tabel, {}),
+            hide_index=True,
+            width="stretch",
+        )
+        if st.button("Opslaan", key=f"opslaan_{tabel}"):
+            try:
+                aantal = beheer.sla_op(con, tabel, bewerkt)
+            except OpslaanFout as fout:
+                st.error(f"Niet opgeslagen: {fout}")
+            else:
+                st.session_state.pop(f"editor_{tabel}", None)
+                st.session_state.pop("berekening", None)
+                st.session_state["gegevens_melding"] = f"{namen[tabel]} opgeslagen ({aantal} wijzigingen)."
+                st.rerun()
+
     tabs = st.tabs([namen[t] for t in beheer.TABBLADEN])
     for tab, tabel in zip(tabs, beheer.TABBLADEN):
         with tab:
-            bewerkt = st.data_editor(
-                beheer.lees(con, tabel),
-                num_rows="dynamic",
-                key=f"editor_{tabel}",
-                column_config=kolom_instellingen.get(tabel, {}),
-                hide_index=True,
-                width="stretch",
-            )
-            if st.button("Opslaan", key=f"opslaan_{tabel}"):
-                try:
-                    aantal = beheer.sla_op(con, tabel, bewerkt)
-                except OpslaanFout as fout:
-                    st.error(f"Niet opgeslagen: {fout}")
-                else:
-                    st.session_state.pop(f"editor_{tabel}", None)
-                    st.session_state.pop("berekening", None)
-                    st.session_state["gegevens_melding"] = f"{namen[tabel]} opgeslagen ({aantal} wijzigingen)."
-                    st.rerun()
+            bewerk(tabel)
+
+    st.subheader("Capaciteit, blokuren en groepsgrootte")
+    for tabel in beheer.EXTRA_TABELLEN:
+        with st.expander(namen[tabel]):
+            bewerk(tabel)
 finally:
     con.close()

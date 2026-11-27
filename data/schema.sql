@@ -34,6 +34,26 @@ CREATE TABLE IF NOT EXISTS les (
     lokaaltype       TEXT    NOT NULL CHECK (lokaaltype IN ('regulier','lab','gym'))
 );
 
+-- Extra gegevens van een lokaal: hoeveel leerlingen erin passen (H8). Geen rij: geen grens.
+CREATE TABLE IF NOT EXISTS lokaal_capaciteit (
+    lokaal_id   TEXT    PRIMARY KEY REFERENCES lokaal(id) ON DELETE CASCADE,
+    capaciteit  INTEGER NOT NULL CHECK (capaciteit > 0)
+);
+
+-- Extra gegevens van een les: blokuur (H9) en aantal leerlingen (H8). Geen rij: geen blokuur, onbekend.
+CREATE TABLE IF NOT EXISTS les_eigenschap (
+    les_id             TEXT    PRIMARY KEY REFERENCES les(id) ON DELETE CASCADE,
+    blokuur            INTEGER NOT NULL DEFAULT 0 CHECK (blokuur IN (0, 1)),
+    aantal_leerlingen  INTEGER CHECK (aantal_leerlingen IS NULL OR aantal_leerlingen > 0)
+);
+
+-- Tijdelijke afwezigheid (bijvoorbeeld ziekte), alleen gebruikt bij herplannen.
+CREATE TABLE IF NOT EXISTS afwezig (
+    leraar_id    TEXT    NOT NULL REFERENCES leraar(id) ON DELETE CASCADE,
+    tijdslot_id  INTEGER NOT NULL REFERENCES tijdslot(id) ON DELETE CASCADE,
+    PRIMARY KEY (leraar_id, tijdslot_id)
+);
+
 CREATE TABLE IF NOT EXISTS ingepland (
     les_id       TEXT    NOT NULL REFERENCES les(id) ON DELETE CASCADE,
     volgnummer   INTEGER NOT NULL,

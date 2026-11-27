@@ -15,11 +15,13 @@ from src import constraints
 from src.lokalen import h5_geldt, wijs_lokalen_toe
 from src.models import (
     STANDAARD_GEWICHTEN,
+    Afwezigheid,
     Instellingen,
     ProbleemData,
     Resultaat,
     Status,
     Toewijzing,
+    met_afwezigheid,
 )
 
 STATUS_VERTALING: dict[int, Status] = {
@@ -119,6 +121,8 @@ def harde_regels(
     constraints.h2_h5_genoeg_lokalen(model, x, data, uitgeschakeld, schakelaars)
     constraints.h3_leraar_een_les(model, x, data)
     constraints.h4_klas_een_les(model, x, data)
+    constraints.h8_lokaalcapaciteit(model, x, data, uitgeschakeld)
+    constraints.h9_blokuren(model, x, data)
     if symmetrie:
         constraints.volgorde_binnen_les(model, x, data)
     if "H6" not in uitgeschakeld:
@@ -214,11 +218,14 @@ def _waarden(solver: cp_model.CpSolver, x: constraints.Variabelen) -> Oplossing:
 
 
 def _toewijzingen(
-    data: ProbleemData, oplossing: Oplossing, uitgeschakeld: frozenset[str] = frozenset()
+    data: ProbleemData,
+    oplossing: Oplossing,
+    uitgeschakeld: frozenset[str] = frozenset(),
+    voorkeur: dict[tuple[str, int], str] | None = None,
 ) -> tuple[Toewijzing, ...]:
     """Zet een oplossing (waarde per x-variabele) om in toewijzingen, met lokalen erbij."""
     plaatsing = {l: s for (l, s), waarde in oplossing.items() if waarde}
-    return wijs_lokalen_toe(data, plaatsing, uitgeschakeld)
+    return wijs_lokalen_toe(data, plaatsing, uitgeschakeld, voorkeur)
 
 
 def _gestopt(voortgang: Voortgang | None) -> bool:
@@ -420,3 +427,92 @@ def _zet_hint(model: cp_model.CpModel, waarden: list[int]) -> None:
         raise RuntimeError("De hint past niet op het model.")
     proto.solution_hint.vars.extend(range(len(waarden)))
     proto.solution_hint.values.extend(waarden)
+
+
+def _aantal_wijzigingen(
+    model: cp_model.CpModel, x: constraints.Variabelen, data: ProbleemData, oud: tuple[Toewijzing, ...]
+) -> cp_model.LinearExpr:
+    """Het aantal oude (les, tijdslot)-plaatsen dat niet meer gebruikt wordt.
+
+    Per les en niet per lesuur: de lesuren van één les zijn uitwisselbaar, dus het
+    telt niet als een wijziging als twee lesuren van dezelfde les van nummer ruilen.
+    """
+    per_les: dict[str, list[int]] = defaultdict(list)
+    for l, uur in enumerate(data.lesuren):
+        per_les[uur.les_id].append(l)
+    plekken = {(t.lesuur.les_id, t.tijdslot_id) for t in oud}
+    blijft = []
+    for les_id, s in sorted(plekken):
+        if s in data.tijdslot_per_id and les_id in per_les:
+            houd = model.NewBoolVar(f"houd_{les_id}_{s}")
+            model.Add(sum(x[l, s] for l in per_les[les_id]) >= houd)
+            blijft.append(houd)
+    return len(plekken) - sum(blijft)
+
+
+def herplan(
+    data: ProbleemData,
+    oud: tuple[Toewijzing, ...],
+    afwezig: Afwezigheid,
+    instellingen: Instellingen | None = None,
+    voortgang: Voortgang | None = None,
+) -> Resultaat:
+    """Pas een rooster aan voor afwezige leraren, met zo weinig mogelijk wijzigingen.
+
+    Lexicografisch, in twee stappen binnen de tijdslimiet: eerst zo weinig mogelijk
+    verplaatste lesuren (de afwezige uren tellen als onbeschikbaar), daarna, met dat
+    aantal als bovengrens, zo weinig mogelijk strafpunten. Lokalen blijven waar het kan.
+    """
+    instellingen = instellingen or Instellingen()
+    data_afw = met_afwezigheid(data, afwezig)
+    limiet = max(instellingen.tijdslimiet_s, MINIMUM_FASE_2_S)
+    model, x, _ = bouw_model(data_afw, gewichten=GEEN_ZACHTE_REGELS)
+    wijzigingen = _aantal_wijzigingen(model, x, data_afw, oud)
+    model.Minimize(wijzigingen)
+    _hint_rooster(model, x, data_afw, oud)
+    solver, status = _los_op(model, limiet / 2, instellingen, voortgang)
+    tijd = solver.WallTime()
+    if status not in ("optimaal", "geldig"):
+        return Resultaat(status, (), tijd, tijd_zoeken_s=tijd, gestopt=_gestopt(voortgang))
+    minimum, eerste = round(solver.ObjectiveValue()), _waarden(solver, x)
+    return _herplan_stap_2(data_afw, oud, instellingen, minimum, eerste, limiet / 2, tijd, voortgang)
+
+
+def _herplan_stap_2(
+    data: ProbleemData,
+    oud: tuple[Toewijzing, ...],
+    instellingen: Instellingen,
+    maximum: int,
+    start: Oplossing,
+    tijdslimiet_s: float,
+    tijd: float,
+    voortgang: Voortgang | None,
+) -> Resultaat:
+    """Stap 2: hoogstens 'maximum' wijzigingen, zo weinig mogelijk strafpunten."""
+    gewichten, voorkeur = instellingen.gewichten, {(t.lesuur.les_id, t.tijdslot_id): t.lokaal_id for t in oud}
+    model, x, straffen = bouw_model(data, gewichten=gewichten, zware_vakken=instellingen.zware_vakken)
+    model.Add(_aantal_wijzigingen(model, x, data, oud) <= maximum)
+    for sleutel, var in x.items():
+        model.AddHint(var, start[sleutel])
+    if voortgang is not None:
+        voortgang.fase = "verbeteren"
+    solver, status = _los_op(model, tijdslimiet_s, instellingen, voortgang)
+    tijd += solver.WallTime()
+    if status in ("optimaal", "geldig"):
+        straf = {regel: gewichten[regel] * solver.Value(som) for regel, som in straffen.items()}
+        oplossing = _waarden(solver, x)
+    else:  # stap 2 vond niets binnen de tijd: houd de oplossing van stap 1
+        straf, oplossing, status = {}, start, "geldig"
+    toewijzingen = _toewijzingen(data, oplossing, voorkeur=voorkeur)
+    score = sum(straf.values()) if straf or not actieve_regels(gewichten) else None
+    return Resultaat(status, toewijzingen, tijd, score, straf, 0.0, _gestopt(voortgang))
+
+
+def _hint_rooster(
+    model: cp_model.CpModel, x: constraints.Variabelen, data: ProbleemData, oud: tuple[Toewijzing, ...]
+) -> None:
+    """Geef het oude rooster als hint (alleen de x-variabelen; ook als het nu niet meer past)."""
+    plekken = {(t.lesuur.les_id, t.lesuur.volgnummer): t.tijdslot_id for t in oud}
+    for (l, s), var in x.items():
+        uur = data.lesuren[l]
+        model.AddHint(var, int(plekken.get((uur.les_id, uur.volgnummer)) == s))

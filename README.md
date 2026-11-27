@@ -40,6 +40,7 @@ Zonder browser kan het ook in de terminal:
 python -m src.cli seed                      # voorbeelddata in data/rooster.db (--variant onmogelijk of --variant groot)
 python -m src.cli solve                     # rooster berekenen en per klas afdrukken
 python -m src.cli check                     # berekenen en onafhankelijk controleren op H1-H7
+python -m src.cli bench                     # de solver meten op de voorbeelddata (zie "Resultaat op de voorbeelddata")
 ```
 
 ## Rollen
@@ -60,8 +61,8 @@ De navigatie toont alleen de pagina's van je rol, en elke pagina controleert de 
 
 - **Gebruikers** (roostermaker): accounts aanmaken, rol en leraar wijzigen, een nieuw wachtwoord instellen en accounts verwijderen. De laatste roostermaker kan niet verdwijnen. Met **Accounts maken voor alle leraren** krijgt elke leraar zonder account in één keer een account, gekoppeld aan die leraar, met de leraarcode als gebruikersnaam. Voorlopig hebben alle leraren hetzelfde wachtwoord, `docent123` (`LERAAR_WACHTWOORD` in `src/auth.py`); bij een leraaraccount zet **Terugzetten naar docent123** het wachtwoord terug. Dat is alleen bedoeld voor het prototype.
 - **Mijn rooster**: het eigen rooster van een leraar, alleen om te bekijken. Dit is het rooster dat met "Opslaan in database" is bewaard.
-- **Gegevens**: dagen en uren per dag instellen, en leraren, lokalen, onbeschikbaarheid en lessen invullen of aanpassen. Bij het opslaan wordt alleen gewijzigd wat de gebruiker echt aanpast; foute invoer geeft een melding en laat de database ongewijzigd. Tijdslots opnieuw aanmaken wist de onbeschikbaarheid en het bewaarde rooster (de app waarschuwt eerst).
-- **Rooster**: toont de aantallen en de meldingen van de validatie, berekent het rooster en toont status, oplostijd, schendingen, strafscore en per zachte regel het aantal (tussenuren klassen, tussenuren leraren, dubbele vakuren, zware vakken in het laatste uur). Het rooster is te bekijken per klas, per leraar en per lokaal, op te slaan in de database en te downloaden als CSV. Is er geen rooster mogelijk, dan staat er een uitleg bij. De tijd om te verbeteren en de gewichten van de zachte regels stel je in de zijbalk in onder **Geavanceerd** (standaardwaarden in `config.toml`).
+- **Gegevens**: dagen en uren per dag instellen, en leraren, lokalen, onbeschikbaarheid en lessen invullen of aanpassen; daaronder de capaciteit van lokalen, blokuren en het aantal leerlingen per les. Bij het opslaan wordt alleen gewijzigd wat de gebruiker echt aanpast; foute invoer geeft een melding en laat de database ongewijzigd. Tijdslots opnieuw aanmaken wist de onbeschikbaarheid en het bewaarde rooster (de app waarschuwt eerst).
+- **Rooster**: toont de aantallen en de meldingen van de validatie, berekent het rooster en toont status, oplostijd, schendingen, strafscore en per zachte regel het aantal (tussenuren klassen, tussenuren leraren, dubbele vakuren, zware vakken in het laatste uur). Het rooster is te bekijken per klas, per leraar en per lokaal, op te slaan in de database en te downloaden als CSV. Harde regels (moeten altijd kloppen) en zachte regels (voorkeuren met strafpunten) staan apart. Onder **Waar komen de strafpunten vandaan?** staat per zachte regel het gewicht, het aantal overtredingen en de strafpunten (samen precies de strafscore), en elke overtreding met dag, uren, klassen, leraren en lokalen; die lijst komt van de onafhankelijke checker. Na **Verder verbeteren** toont de strafscore het verschil met het vorige rooster en staat onder **Geschiedenis van de strafscore** elke run met de score ervoor en erna. Het beste geldige rooster van de sessie blijft bewaard: is een latere berekening slechter, dan kun je het terugzetten. Is er geen rooster mogelijk, dan staat er een uitleg bij. De tijd om te verbeteren en de gewichten van de zachte regels stel je in de zijbalk in onder **Geavanceerd** (standaardwaarden in `config.toml`).
 
 ## Regels
 
@@ -76,6 +77,12 @@ De navigatie toont alleen de pagina's van je rol, en elke pagina controleert de 
 | H5 | Een les gebruikt alleen een lokaal van het gevraagde type (regulier, lab of gym) |
 | H6 | Een leraar staat niet ingepland op een onbeschikbaar tijdslot |
 | H7 | Een leraar geeft per dag niet meer dan zijn maximum |
+| H8 | Een les komt nooit in een te klein lokaal (als capaciteit en aantal leerlingen ingevuld zijn) |
+| H9 | Een blokles staat per twee lesuren direct na elkaar op dezelfde dag, niet over de middagpauze (`pauze_na_uur` in `config.toml`, standaard na uur 4) |
+
+H8 en H9 gelden alleen voor lessen en lokalen waarvoor je dat op de pagina **Gegevens** invult, onder **Capaciteit, blokuren en groepsgrootte**. Die gegevens staan in aparte tabellen (`lokaal_capaciteit`, `les_eigenschap`), zodat bestaande databases en imports gewoon blijven werken. Net als bij de lokaaltypes zitten lokalen niet in het model: per tijdslot eist het model genoeg lokalen per type en grootte, en daarna krijgen de grootste groepen eerst een lokaal dat past. Een blokles houdt waar het kan voor beide uren hetzelfde lokaal; dat is een voorkeur, geen harde regel. Een blokles met een oneven aantal uren of een groep die in geen enkel lokaal past, geeft vooraf een foutmelding.
+
+**Herplannen bij afwezigheid.** Op de pagina **Rooster** meld je onder **Herplannen bij afwezigheid** een docent afwezig voor een of meer dagen (of uren). De solver past het rooster dan aan in twee stappen: eerst zo weinig mogelijk lesuren verplaatsen (de lessen van de afwezige docent schuiven naar een ander moment in de week), daarna met dat aantal zo weinig mogelijk strafpunten. Lokalen blijven waar het kan. De app toont elke wijziging (van, naar) en de checker kijkt het nieuwe rooster na, met de afwezige uren als onbeschikbaar. Het bewaarde rooster verandert pas als je opslaat. Vervangers en lessen laten vervallen zitten er niet in.
 
 **Zachte regels** (de solver minimaliseert de som van gewicht × aantal):
 
@@ -90,10 +97,32 @@ Gewicht 0 schakelt een regel uit. Welke vakken "zwaar" zijn, staat in `config.to
 
 ## Resultaat op de voorbeelddata
 
-6 klassen, 10 leraren, 7 lokalen, 30 tijdslots en 144 lesuren, gemeten op een gewone laptop met alle zachte regels op hun standaardgewicht:
+De meting is te herhalen met:
 
-- oplostijd: ongeveer 14 seconden voor beide fases samen (zoeken minder dan 1 s), status `optimaal`: het optimum is gevonden voor de 30 seconden verbetertijd om zijn
-- strafscore: 0, dus geen tussenuren voor klassen of leraren, geen vak twee keer op een dag en geen wiskunde in het laatste uur
+```bash
+python -m src.cli bench                     # 3 runs op de voorbeelddata, met hardware en instellingen
+python -m src.cli bench --werkers 1         # met één zoekdraad: trager, maar elke run geeft hetzelfde rooster
+```
+
+**Dataset:** variant `voorbeeld` uit `src/seed.py` (verzonnen): 6 klassen, 10 leraren, 7 lokalen, 30 tijdslots, 144 lesuren.
+**Configuratie:** `config.toml` zoals in de repo: verbetertijd 30 s, `random_seed = 0`, `num_workers = 0` (zoveel zoekdraden als logische kernen), gewichten Z1 = 10, Z2 = 5, Z3 = 5, Z4 = 2, zware vakken: wiskunde.
+**Hardware en software:** AMD Ryzen AI 7 350 (8 kernen, 16 logische kernen), Windows 11, Python 3.12, OR-Tools 9.15 (27 november 2026).
+
+| Zoekdraden | Status | Tijd (zoeken + verbeteren) | Strafscore |
+| --- | --- | --- | --- |
+| 16 (standaard op deze laptop) | `optimaal` | 4 tot 5,4 s | 0 |
+| 8 | `optimaal` | 2 tot 4,2 s | 0 |
+| 4 | `optimaal` | 2,2 s | 0 |
+| 2 | `optimaal` | 13 tot 15 s | 0 |
+| 1 | `geldig` | 30,6 s (tijdslimiet) | 626, bij elke run dezelfde |
+
+Het zoeken naar een eerste geldig rooster duurt altijd minder dan 1 s. **De uitvoeringstijd hangt vooral af van het aantal zoekdraden**, dus van de processor: CP-SAT laat elke draad een andere zoekstrategie proberen, en met weinig draden ontbreken de strategieën die het optimum snel vinden. Met 4 of meer draden is strafscore 0 binnen enkele seconden gevonden en bewezen (`optimaal`). Met 1 of 2 draden (een oude laptop, een container met weinig CPU, of veel andere programma's tegelijk) loopt de verbetertijd van 30 s helemaal op en blijft het rooster `geldig` met nog strafpunten. Een meting van ongeveer 30 s met status `geldig` betekent dus: de tijdslimiet is bereikt voor het optimum gevonden was. Meer verbetertijd of **Verder verbeteren** helpt dan.
+
+Met meer dan één zoekdraad hangt de uitkomst ook wat af van de timing tussen de draden, ondanks de vaste seed; met `num_workers = 1` is elke run gelijk.
+
+Verder op de voorbeelddata:
+
+- strafscore 0 betekent: geen tussenuren voor klassen of leraren, geen vak twee keer op een dag en geen wiskunde in het laatste uur
 - ter vergelijking: zonder Z1 heeft een willekeurig geldig rooster ongeveer 20 tussenuren voor klassen, en met alleen Z1 hebben de leraren samen ongeveer 40 tussenuren
 - schendingen volgens de checker: 0
 
@@ -139,7 +168,7 @@ De volledige testsuite duurt ongeveer vier à vijf minuten, omdat een deel van d
 ## Bekende beperkingen
 
 - Een lesuur is altijd één uur; er zijn geen lessen van twee uur.
-- Geen keuzevakken over meerdere klassen, geen lokaalcapaciteit en klasgrootte, geen herplannen na ziekte.
+- Geen keuzevakken over meerdere klassen. Lokaalcapaciteit, blokuren en herplannen na ziekte zitten er wel in (H8, H9, zie Regels), maar herplannen kent geen vervangers: de lessen schuiven alleen naar een ander moment. Capaciteit en blokuren zijn niet in te lezen via Importeren; vul ze in op de pagina Gegevens.
 - Geen serverdatabase: het is één SQLite-bestand, bedoeld voor kleinschalig gebruik.
 - De rollen zijn bedoeld voor het prototype, niet voor echte schoolgegevens op internet: er is geen HTTPS, geen blokkering na foute inlogpogingen en geen herstel via e-mail. Na het inloggen staat een ondertekende sessiecode in de adresbalk (`?sessie=...`), zodat je na het vernieuwen 8 uur ingelogd blijft; uitloggen haalt de code weg. Deel die link dus niet: wie hem heeft, is tot de code verloopt als jou ingelogd. De sleutel staat in `data/.sessiesleutel` (niet in git); dat bestand verwijderen logt iedereen uit.
 - Er is geen concept of publicatie: elk rooster dat wordt opgeslagen is meteen zichtbaar voor leraren.

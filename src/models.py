@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from typing import Literal
 
@@ -30,11 +30,12 @@ class Tijdslot:
 
 @dataclass(frozen=True)
 class Lokaal:
-    """Een lokaal van een bepaald type."""
+    """Een lokaal van een bepaald type; capaciteit None betekent: geen grens bekend."""
 
     id: str
     naam: str
     type: LokaalType
+    capaciteit: int | None = None
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,11 @@ class Leraar:
 
 @dataclass(frozen=True)
 class Les:
-    """Een vak voor een klas, zoals het in de database staat."""
+    """Een vak voor een klas, zoals het in de database staat.
+
+    Met blokuur komen de lesuren per twee na elkaar op dezelfde dag (H9).
+    aantal_leerlingen (None: onbekend) moet in het lokaal passen (H8).
+    """
 
     id: str
     vak: str
@@ -57,6 +62,8 @@ class Les:
     leraar_id: str
     aantal_per_week: int
     lokaaltype: LokaalType
+    blokuur: bool = False
+    aantal_leerlingen: int | None = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +87,7 @@ class ProbleemData:
     leraren: tuple[Leraar, ...]
     lessen: tuple[Les, ...]
     lesuren: tuple[Lesuur, ...]
+    pauze_na_uur: int = 0  # een blokuur loopt niet over deze pauze (0: geen pauze)
 
     @cached_property
     def klassen(self) -> tuple[str, ...]:
@@ -170,6 +178,25 @@ class Schending:
 
 
 @dataclass(frozen=True)
+class Strafpost:
+    """Eén overtreding van een zachte regel, met wie en wat erbij betrokken is.
+
+    aantal is het aantal overtredingen in deze post (bij Z3 kan dat meer dan 1 zijn);
+    punten is gewicht × aantal. De punten van alle posten samen zijn de strafscore.
+    """
+
+    regel: str
+    aantal: int
+    punten: int
+    dag: str
+    uren: tuple[int, ...]
+    klassen: tuple[str, ...]
+    leraren: tuple[str, ...]  # namen
+    lokalen: tuple[str, ...]  # namen
+    tekst: str
+
+
+@dataclass(frozen=True)
 class Instellingen:
     """Tijd om te verbeteren, gewichten van de zachte regels, de zoekgrens en de zware vakken.
 
@@ -179,6 +206,7 @@ class Instellingen:
     random_seed maakt de zoektocht herhaalbaar; num_workers is het aantal zoekdraden
     van CP-SAT (0: zoveel als de computer processorkernen heeft). symmetrie_breken legt
     de lesuren van één les in weekvolgorde (standaard uit: dat bleek trager).
+    pauze_na_uur: een blokuur mag niet over de pauze na dit uur lopen (0: geen pauze).
     """
 
     tijdslimiet_s: float = 30
@@ -190,3 +218,30 @@ class Instellingen:
     random_seed: int = 0
     num_workers: int = 0
     symmetrie_breken: bool = False
+    pauze_na_uur: int = 0
+
+
+Afwezigheid = frozenset[tuple[str, int]]  # (leraar_id, tijdslot_id)
+
+
+def met_afwezigheid(data: ProbleemData, afwezig: Afwezigheid) -> ProbleemData:
+    """De gegevens met de afwezige tijdslots erbij als onbeschikbaar (H6)."""
+    extra: dict[str, set[int]] = {}
+    for leraar_id, slot in afwezig:
+        extra.setdefault(leraar_id, set()).add(slot)
+    leraren = tuple(
+        replace(l, onbeschikbaar=l.onbeschikbaar | frozenset(extra[l.id])) if l.id in extra else l
+        for l in data.leraren
+    )
+    return replace(data, leraren=leraren)
+
+
+@dataclass(frozen=True)
+class Wijziging:
+    """Een lesuur dat bij het herplannen van tijdslot of lokaal verandert (None: geen)."""
+
+    les_id: str
+    van_slot: int | None
+    naar_slot: int | None
+    van_lokaal: str | None
+    naar_lokaal: str | None

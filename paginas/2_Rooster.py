@@ -13,7 +13,68 @@ from src.ui import (
     volg_rekenen,
     zijbalk_met_regels,
 )
-from src.views import SOORTEN, keuzes, rooster_csv, rooster_html
+from src.views import (
+    SOORTEN,
+    geschiedenis_tabel,
+    keuzes,
+    rooster_csv,
+    rooster_html,
+    straf_details,
+    straf_samenvatting,
+    wijzigingen_tabel,
+)
+
+
+
+def herplan_formulier(pad, data, berekening, instellingen) -> None:
+    """Een docent afwezig melden en het rooster aanpassen met zo weinig mogelijk wijzigingen."""
+    with st.expander("Herplannen bij afwezigheid (bijvoorbeeld ziekte)"):
+        st.caption(
+            "De lessen van de afwezige docent schuiven naar een ander moment in de week; de rest "
+            "van het rooster verandert zo weinig mogelijk. Het bewaarde rooster blijft staan tot je opslaat."
+        )
+        docenten = {leraar.id: leraar.naam for leraar in data.leraren}
+        gekozen_docenten = st.multiselect(
+            "Afwezige docent(en)", list(docenten), format_func=docenten.get, key="afwezig_docent"
+        )
+        dagen = st.multiselect("Dagen", list(data.dagen), key="afwezig_dagen")
+        uren = sorted({slot.uur for slot in data.tijdslots})
+        gekozen = st.multiselect("Uren (leeg: de hele dag)", uren, key="afwezig_uren")
+        afwezig = frozenset(
+            (leraar_id, slot.id) for leraar_id in gekozen_docenten for slot in data.tijdslots
+            if slot.dag in dagen and (not gekozen or slot.uur in gekozen)
+        )
+        if st.button("Herplannen", disabled=not afwezig):
+            st.session_state["voor_herplanning"] = berekening
+            start_rekenen(
+                lambda voortgang, b=berekening, a=afwezig: service.herplan_rooster(
+                    pad, data, b, a, instellingen, voortgang
+                )
+            )
+            st.rerun()
+
+
+def toon_herplanning(data, berekening) -> None:
+    """Wat er bij het herplannen veranderde, met een weg terug naar het rooster van ervoor."""
+    vorig = st.session_state.get("voor_herplanning")
+    if vorig is not None and service.is_actueel(vorig, data) and st.button("Terug naar het rooster zonder afwezigheid"):
+        st.session_state["berekening"] = vorig
+        st.rerun()
+    namen = sorted({data.leraar_per_id[l].naam for l, _ in berekening.afwezig if l in data.leraar_per_id})
+    if not berekening.resultaat.toewijzingen:
+        st.error(
+            f"Geen rooster mogelijk met de afwezigheid van {', '.join(namen)}: er zijn niet genoeg "
+            "vrije momenten om de lessen naar te verschuiven."
+        )
+        return
+    verplaatst = sum(1 for w in berekening.wijzigingen if w.van_slot != w.naar_slot)
+    st.success(
+        f"Herplanning voor de afwezigheid van {', '.join(namen)}: {verplaatst} lesuren verplaatst, "
+        f"{len(berekening.wijzigingen) - verplaatst} alleen naar een ander lokaal."
+    )
+    st.dataframe(wijzigingen_tabel(data, list(berekening.wijzigingen)), hide_index=True)
+    st.caption("Opslaan vervangt het bewaarde rooster door dit aangepaste rooster.")
+
 
 st.set_page_config(page_title="Rooster", layout="wide")
 gebruiker = vereis_recht("rooster")
@@ -53,6 +114,33 @@ if berekening is not None and not service.is_actueel(berekening, data):
         "De gegevens zijn veranderd sinds de laatste berekening. Bereken het rooster opnieuw."
     )
 berekening = berekening or service.bewaard_rooster(pad, data, instellingen)
+
+# Het beste geldige rooster van deze sessie blijft bewaard, ook als een latere run slechter is.
+beste = st.session_state.get("beste_berekening")
+if beste is not None and not service.is_actueel(beste, data):
+    beste = None
+if berekening is not None and not berekening.bewaard and (
+    beste is None
+    or not service.vergelijkbaar(berekening, beste)
+    or service.is_beter(berekening, beste)
+):
+    beste = berekening
+st.session_state["beste_berekening"] = beste
+if (
+    berekening is not None
+    and beste is not None
+    and beste is not berekening
+    and service.vergelijkbaar(beste, berekening)
+    and service.is_beter(beste, berekening)
+):
+    st.warning(
+        f"Een eerder rooster in deze sessie was beter (strafscore {beste.resultaat.strafscore} "
+        f"tegen {berekening.resultaat.strafscore}). Het blijft bewaard."
+    )
+    if st.button("Beste rooster terugzetten"):
+        st.session_state["berekening"] = beste
+        st.rerun()
+
 if berekening is not None:
     resultaat = berekening.resultaat
     kolommen = st.columns(4)
@@ -64,13 +152,38 @@ if berekening is not None:
         resultaat.toewijzingen
     )  # zonder rooster valt er niets te tellen
     kolommen[2].metric(
-        "Schendingen", len(berekening.schendingen) if heeft_rooster else "-"
+        "Schendingen", len(berekening.schendingen) if heeft_rooster else "-",
+        help="Harde regels H1–H7: moeten altijd kloppen. Onafhankelijk nagekeken door de checker.",
     )
     strafscore = resultaat.strafscore if heeft_rooster else None
-    kolommen[3].metric("Strafscore", "-" if strafscore is None else strafscore)
+    vorige = berekening.vorige_strafscore
+    verschil = None if strafscore is None or vorige is None else strafscore - vorige
+    kolommen[3].metric(
+        "Strafscore", "-" if strafscore is None else strafscore,
+        delta=verschil, delta_color="inverse",
+        help="Zachte regels Z1–Z4: voorkeuren. Elke overtreding kost strafpunten (gewicht × aantal).",
+    )
+    if heeft_rooster:
+        if berekening.schendingen:
+            st.error("**Harde regels:** dit rooster schendt een harde regel en is niet bruikbaar.")
+        else:
+            st.success("**Harde regels (H1–H7):** allemaal gehaald, onafhankelijk nagekeken.")
+        st.markdown("**Zachte regels (Z1–Z4):** voorkeuren; elke overtreding kost strafpunten.")
     kolommen = st.columns(len(ZACHTE_REGEL_NAMEN))
     for kolom, (regel, naam) in zip(kolommen, ZACHTE_REGEL_NAMEN.items()):
         kolom.metric(naam, berekening.tellingen.get(regel, 0) if heeft_rooster else "-")
+    if heeft_rooster and berekening.gewichten:
+        with st.expander("Waar komen de strafpunten vandaan?"):
+            st.dataframe(
+                straf_samenvatting(
+                    list(berekening.strafposten), berekening.gewichten, ZACHTE_REGEL_NAMEN
+                ),
+                hide_index=True,
+            )
+            if berekening.strafposten:
+                st.dataframe(straf_details(list(berekening.strafposten)), hide_index=True)
+            else:
+                st.caption("Geen enkele zachte regel overtreden.")
     for schending in berekening.schendingen:
         st.error(f"{schending.regel}: {schending.tekst}")
     if resultaat.status == "onoplosbaar":
@@ -110,6 +223,9 @@ if berekening is not None:
             f"Zoeken naar een geldig rooster: {resultaat.tijd_zoeken_s:.1f} s. "
             f"Verbeteren: {verbeteren:.1f} s."
         )
+    if any(p.soort == "verder verbeteren" for p in berekening.geschiedenis):
+        with st.expander("Geschiedenis van de strafscore"):
+            st.dataframe(geschiedenis_tabel(berekening.geschiedenis), hide_index=True)
     if service.kan_verder(berekening) and st.button(
         "Verder verbeteren",
         help="Rekent verder vanaf dit rooster, met de verbetertijd uit de zijbalk. Dit rooster "
@@ -121,6 +237,10 @@ if berekening is not None:
             )
         )
         st.rerun()
+    if berekening.afwezig:
+        toon_herplanning(data, berekening)
+    elif resultaat.toewijzingen and not berekening.schendingen:
+        herplan_formulier(pad, data, berekening, instellingen)
     if resultaat.toewijzingen:
         opslaan, download = st.columns(2)
         if opslaan.button("Opslaan in database"):
